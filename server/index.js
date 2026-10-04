@@ -8,6 +8,10 @@ import db, { addEvent } from './db.js'
 import { seed } from './seed.js'
 import { createVisit, closeFollowup } from './service.js'
 import { assessVisit } from './risk.js'
+import {
+  recordRefusal, addContact, resolveEscalation, getEscalation,
+  listEscalations, refusalsOfArchive, escalationOfArchive,
+} from './escalation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -62,10 +66,12 @@ app.get('/api/dashboard', auth, requireRole('nurse', 'doctor'), (req, res) => {
       jaundiceAlerts: cnt(`SELECT COUNT(DISTINCT archive_id) c FROM followups WHERE status!='已闭环' AND type IN ('复查','转诊')`),
       maternalRisks: cnt(`SELECT COUNT(DISTINCT archive_id) c FROM followups WHERE status!='已闭环' AND type='电话随访'`),
       openFollowups: openFollowups.length,
+      refusalEscalations: cnt(`SELECT COUNT(*) c FROM escalations WHERE status IN ('待处置','处置中','已联系街道','已恢复访视')`),
       todayAppointments: cnt(`SELECT COUNT(*) c FROM appointments WHERE date(scheduled_time)=date(?) AND status='待访视'`, todayStr + ' 12:00'),
     },
     followupsByType: byType,
     todayAppointments: appts,
+    openEscalations: listEscalations('open').slice(0, 5),
     recentHighRiskVisits: db.prepare(`
       SELECT v.id, v.visit_time, v.risk_level, v.bilirubin, v.weight, ar.id archive_id, ar.mother_name, ar.baby_name
       FROM visits v JOIN archives ar ON ar.id=v.archive_id
@@ -132,7 +138,9 @@ app.get('/api/archives', auth, requireRole('nurse', 'doctor'), (req, res) => {
       (SELECT COUNT(*) FROM followups f WHERE f.archive_id=ar.id AND f.status!='已闭环') open_followups,
       (SELECT v.risk_level FROM visits v WHERE v.archive_id=ar.id ORDER BY v.visit_time DESC LIMIT 1) last_risk,
       (SELECT v.bilirubin FROM visits v WHERE v.archive_id=ar.id ORDER BY v.visit_time DESC LIMIT 1) last_bilirubin,
-      (SELECT MIN(a.scheduled_time) FROM appointments a WHERE a.archive_id=ar.id AND a.status='待访视') next_appt
+      (SELECT MIN(a.scheduled_time) FROM appointments a WHERE a.archive_id=ar.id AND a.status='待访视') next_appt,
+      (SELECT COUNT(*) FROM refusals r WHERE r.archive_id=ar.id) refusal_count,
+      (SELECT COUNT(*) FROM escalations e WHERE e.archive_id=ar.id AND e.status!='已闭环') open_escalations
     FROM archives ar ORDER BY ar.created_at DESC`).all()
   if (q) {
     const s = String(q).toLowerCase()
@@ -142,6 +150,7 @@ app.get('/api/archives', auth, requireRole('nurse', 'doctor'), (req, res) => {
   if (filter === 'jaundice') rows = rows.filter(r => r.last_bilirubin != null && ['高', '危急'].includes(r.last_risk))
   if (filter === 'maternal') rows = rows.filter(r =>
     db.prepare(`SELECT COUNT(*) c FROM followups WHERE archive_id=? AND status!='已闭环' AND type='电话随访'`).get(r.id).c > 0)
+  if (filter === 'refusal') rows = rows.filter(r => r.refusal_count > 0)
   if (filter === 'unclosed') rows = rows.filter(r => r.open_followups > 0)
   res.json({ archives: rows })
 })
@@ -157,6 +166,8 @@ app.get('/api/archives/:id', auth, (req, res) => {
     appointments: db.prepare('SELECT a.*, u.name nurse_name FROM appointments a LEFT JOIN users u ON u.id=a.nurse_id WHERE a.archive_id=? ORDER BY a.scheduled_time DESC').all(archive.id),
     visits,
     followups: db.prepare('SELECT * FROM followups WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),
+    refusals: refusalsOfArchive(archive.id),
+    escalations: escalationOfArchive(archive.id),
     documents: db.prepare('SELECT id, archive_id, type, filename, data_url, note, created_at FROM documents WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),
     consults: db.prepare('SELECT * FROM consults WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),
     events: db.prepare('SELECT * FROM events WHERE archive_id=? ORDER BY created_at DESC, id DESC LIMIT 100').all(archive.id),
@@ -230,6 +241,57 @@ app.post('/api/followups/:id/decide', auth, requireRole('doctor', 'nurse'), (req
     }
   }
   res.json({ ok: true })
+})
+
+// ---------- 家属拒访与连续拒访升级 ----------
+app.post('/api/refusals', auth, requireRole('nurse'), (req, res) => {
+  try {
+    const r = recordRefusal(req.body || {}, req.user)
+    res.status(201).json(r)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+app.get('/api/escalations', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  res.json({ escalations: listEscalations(req.query.status || 'open') })
+})
+
+app.get('/api/escalations/:id', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  const e = getEscalation(Number(req.params.id))
+  if (!e) return res.status(404).json({ error: '升级工单不存在' })
+  res.json({ escalation: e })
+})
+
+// 升级流程中记录一次联系：对象 / 语气 / 拒访原因 / 是否看到婴儿
+app.post('/api/escalations/:id/contacts', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  try {
+    res.status(201).json(addContact(Number(req.params.id), req.body || {}, req.user))
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 社区医生/妇幼专员处置：recheck 上门复核（自动带入照片/电话/未完成项）/ street 联系街道 / resume 恢复访视
+app.post('/api/escalations/:id/resolve', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  try {
+    res.json(resolveEscalation(Number(req.params.id), req.body || {}, req.user))
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 护士打开「复核」预约的访视表单时，取自动带入的现场资料
+app.get('/api/rechecks/by-appointment/:appointmentId', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  const r = db.prepare('SELECT * FROM rechecks WHERE appointment_id=?').get(req.params.appointmentId)
+  if (!r) return res.json({ recheck: null })
+  res.json({
+    recheck: {
+      ...r,
+      pending_items: JSON.parse(r.pending_items || '[]'),
+      carried_photos: JSON.parse(r.carried_photos || '[]'),
+    },
+  })
 })
 
 // ---------- 家属端 ----------

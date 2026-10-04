@@ -1,10 +1,12 @@
 // 上门访视记录：测量 + 观察 + 照片 + 建议，实时风险预评估；离线先存草稿，回社区后同步
-import { useEffect, useMemo, useRef, useState } from 'react'
+// 复核模式（recheck=1）：顶部自动带入前次护士到达照片、电话沟通记录与未完成测量项，减少重复询问
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
-import type { Archive, ArchiveDetail, VisitPayload } from '../../types'
+import type { Archive, ArchiveDetail, Recheck, VisitPayload } from '../../types'
 import { assessVisit } from '../../risk'
 import { Badge, Empty, RiskBadge, fmtTime, toast } from '../../components/ui'
+import { PhotoInput } from '../../components/PhotoInput'
 import { isOfflineNow, useNet } from '../../store/net'
 import { newClientId, useDrafts } from '../../store/drafts'
 
@@ -19,6 +21,7 @@ export default function VisitForm() {
   const archiveId = Number(sp.get('archiveId'))
   const appointmentId = sp.get('appointmentId') ? Number(sp.get('appointmentId')) : null
   const [archive, setArchive] = useState<Archive | null>(null)
+  const [recheck, setRecheck] = useState<Recheck | null>(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const nav = useNavigate()
@@ -45,6 +48,12 @@ export default function VisitForm() {
         setF((s) => ({ ...s, feeding_type: s.feeding_type || d.archive.feeding_type, wound_check: s.wound_check || d.archive.maternal_wound, care_ability: s.care_ability || d.archive.care_ability }))
       })
       .catch((e) => setErr(`档案加载失败：${e.message}（离线状态下请回到社区网络环境再打开本页，或先在同步页处理草稿）`))
+    // 若该预约是连续拒访后的「上门复核」，自动带入前次照片/电话记录/未完成测量项
+    if (appointmentId) {
+      api.get<{ recheck: Recheck | null }>(`/api/rechecks/by-appointment/${appointmentId}`)
+        .then((r) => { if (r.recheck) setRecheck(r.recheck) })
+        .catch(() => {})
+    }
   }, [archiveId])
 
   // 实时风险预评估（与服务端同一套规则）
@@ -128,6 +137,37 @@ export default function VisitForm() {
       </div>
 
       {offline && <div className="alert-box warn">📵 离线模式：提交将保存为本地草稿，不会上传服务器</div>}
+
+      {recheck && (
+        <div className="card" style={{ borderColor: 'var(--teal)' }}>
+          <div className="row between mb8">
+            <div className="card-title" style={{ margin: 0 }}><span className="dot" style={{ background: 'var(--teal)' }} />连续拒访后上门复核</div>
+            <Badge color="teal">资料已自动带入</Badge>
+          </div>
+          <div className="small muted mb8">
+            本户此前连续拒访、仅电话沟通。以下为前次到达资料，沟通时无需重复追问，优先完成下列
+            <b style={{ color: 'var(--red)' }}> 未完成测量项</b>：
+          </div>
+          <div className="row wrap mb8">
+            {recheck.pending_items.length === 0 && <Badge color="amber">全套首次访视测量</Badge>}
+            {recheck.pending_items.map((p) => <Badge key={p} color="coral">待补：{p}</Badge>)}
+          </div>
+          {recheck.carried_refusal_reason && (
+            <div className="small mb8"><b>前次拒访原因：</b>{recheck.carried_refusal_reason}</div>
+          )}
+          {recheck.carried_phone_log && (
+            <div className="advice-pre mb8" style={{ whiteSpace: 'pre-wrap' }}>
+              <b>历次电话沟通记录</b>{'\n'}{recheck.carried_phone_log}
+            </div>
+          )}
+          {recheck.carried_photos.length > 0 && (
+            <div>
+              <div className="small strong mb8">前次护士到达照片</div>
+              <div className="photo-row">{recheck.carried_photos.map((p, i) => <img key={i} src={p} alt={`前次到达照片${i + 1}`} />)}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <div className="card-title"><span className="dot" />婴儿测量</div>
@@ -232,7 +272,7 @@ export default function VisitForm() {
 
       <div className="card">
         <div className="card-title"><span className="dot" style={{ background: 'var(--teal)' }} />现场照片（黄疸/脐部/伤口）</div>
-        <PhotoPicker photos={f.photos || []} onChange={(p) => set('photos', p)} />
+        <PhotoInput photos={f.photos || []} onChange={(p) => set('photos', p)} label="📷 拍摄黄疸/脐部/伤口" />
       </div>
 
       {assess && (
@@ -272,50 +312,6 @@ function Seg({ options, value, onChange }: { options: string[]; value: string; o
   return (
     <div className="seg">
       {options.map((o) => <span key={o} className={`opt ${value === o ? 'on' : ''}`} onClick={() => onChange(o)}>{o}</span>)}
-    </div>
-  )
-}
-
-function PhotoPicker({ photos, onChange }: { photos: string[]; onChange: (p: string[]) => void }) {
-  const ref = useRef<HTMLInputElement>(null)
-  function pick(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []).slice(0, 3 - photos.length)
-    let acc = [...photos]
-    files.forEach((file) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const img = new Image()
-        img.onload = () => {
-          const canvas = document.createElement('canvas')
-          const scale = Math.min(1, 480 / Math.max(img.width, img.height))
-          canvas.width = img.width * scale; canvas.height = img.height * scale
-          canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height)
-          acc = [...acc, canvas.toDataURL('image/jpeg', 0.7)]
-          onChange(acc)
-        }
-        img.src = String(reader.result)
-      }
-      reader.readAsDataURL(file)
-    })
-    e.target.value = ''
-  }
-  return (
-    <div>
-      <div className="photo-row mb8">
-        {photos.map((p, i) => (
-          <div key={i} style={{ position: 'relative' }}>
-            <img src={p} alt={`照片${i + 1}`} />
-            <button className="btn danger sm" style={{ position: 'absolute', top: -6, right: -6, padding: '1px 7px' }}
-              onClick={() => onChange(photos.filter((_, j) => j !== i))}>×</button>
-          </div>
-        ))}
-      </div>
-      {photos.length < 3 && (
-        <>
-          <button className="btn ghost sm" onClick={() => ref.current?.click()}>📷 拍照/上传（最多 3 张）</button>
-          <input ref={ref} type="file" accept="image/*" multiple hidden onChange={pick} />
-        </>
-      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 // 端到端验证脚本：node scripts/verify.mjs（需服务已启动，默认 http://localhost:8080）
 // 覆盖：登录、工作台、档案筛选、访视提交与风险结论、离线同步幂等、
-//       未开门/改约、随访闭环、医生决策、家属端总览/材料/咨询
+//       未开门/改约、随访闭环、医生决策、家属端总览/材料/咨询、
+//       家属拒访登记→连续拒访自动升级→联系留痕→上门复核资料带入→成功访视闭环
 const BASE = process.env.BASE_URL || 'http://localhost:8080'
 let passed = 0, failed = 0
 const ok = (name, cond, extra = '') => {
@@ -82,6 +83,93 @@ if (someAppt) {
   const r2 = await call(nurse.token, 'POST', `/api/appointments/${someAppt.id}/reschedule`, { scheduledTime: '2099-01-01 09:00', reason: '验证脚本改约' })
   ok('改约', r2.appointment.status === '待访视' && r2.appointment.scheduled_time.startsWith('2099-01-01'))
 } else ok('未开门/改约', false, '没有可用预约')
+
+// 7.5 家属拒访 → 连续拒访升级 → 联系留痕 → 上门复核资料带入 → 成功访视闭环
+{
+  // 用一个尚无拒访/访视的新户：郑倩/郑小星（明日初访）
+  const zheng = all.archives.find(a => a.baby_name === '郑小星')
+  const zAppt0 = (await call(nurse.token, 'GET', '/api/appointments?status=待访视')).appointments.find(a => a.archive_id === zheng.id)
+
+  // 首次拒访：未约定再次上门时间应被拒绝（拒访必须有明确后续安排）
+  const bad = await call(nurse.token, 'POST', '/api/refusals', {
+    archive_id: zheng.id, appointment_id: zAppt0?.id, arrived_at: new Date().toISOString().slice(0, 16),
+    contact_name: '郑倩', contact_relation: '产妇本人', tone: '不耐烦',
+    reason: '在休息不方便', phone_content: '只愿意电话沟通', baby_seen: 0, baby_status: '未看到',
+  })
+  ok('首次拒访缺少后续安排被拦截', !!bad.error, bad.error || '未拦截')
+
+  // 首次拒访 + 再约 → 不升级，访视任务保持开放
+  const r1 = await call(nurse.token, 'POST', '/api/refusals', {
+    archive_id: zheng.id, appointment_id: zAppt0?.id, arrived_at: new Date().toISOString().slice(0, 16),
+    contact_name: '郑倩', contact_relation: '产妇本人', tone: '不耐烦',
+    reason: '在休息不方便，拒绝开门', phone_content: '隔门电话沟通：称只接受电话，约定明天再来',
+    baby_seen: 0, baby_status: '隔门听到婴儿声', next_time: '2099-02-02 09:30',
+    photos: ['data:image/svg+xml,door1'],
+  })
+  ok('首次拒访登记', r1.streak === 1 && r1.escalatedNow !== true, `连续次数${r1.streak}`)
+  const zDetail1 = await call(nurse.token, 'GET', `/api/archives/${zheng.id}`)
+  ok('拒访不关闭访视任务（自动生成再约预约）',
+    zDetail1.refusals.length === 1 && zDetail1.appointments.some(a => a.status === '待访视' && a.scheduled_time.startsWith('2099-02-02')),
+    `拒访${zDetail1.refusals.length}次`)
+
+  // 第 2 次拒访（对再约的预约）→ 自动升级社区医生
+  const zAppt1 = zDetail1.appointments.find(a => a.status === '待访视' && a.scheduled_time.startsWith('2099-02-02'))
+  const r2 = await call(nurse.token, 'POST', '/api/refusals', {
+    archive_id: zheng.id, appointment_id: zAppt1.id, arrived_at: new Date().toISOString().slice(0, 16),
+    contact_name: '郑倩丈夫', contact_relation: '丈夫', tone: '抵触',
+    reason: '坚持没必要上门', phone_content: '再次电话沟通仍拒绝入户，无法核实婴儿状况',
+    baby_seen: 0, baby_status: '仍未看到婴儿', photos: ['data:image/svg+xml,door2'],
+  })
+  ok('连续2次拒访自动升级', r2.streak === 2 && r2.escalatedNow === true && !!r2.escalation?.id,
+    `工单#${r2.escalation?.id} 升级至${r2.escalation?.level}`)
+  const escId = r2.escalation.id
+
+  // 工作台/档案筛选能看到升级
+  const dash2 = await call(nurse.token, 'GET', '/api/dashboard')
+  ok('工作台拒访升级统计', dash2.stats.refusalEscalations >= 1, `拒访升级${dash2.stats.refusalEscalations}`)
+  const refusalList = await call(nurse.token, 'GET', '/api/archives?filter=refusal')
+  ok('拒访家庭筛选', refusalList.archives.some(a => a.id === zheng.id))
+
+  // 升级流程中记录一次联系（对象/语气/原因/见婴状态）
+  const c1 = await call(doctor.token, 'POST', `/api/escalations/${escId}/contacts`, {
+    channel: '电话', contact_name: '郑倩', contact_relation: '产妇本人', tone: '配合',
+    refusal_reason: '怕邻里说闲话', baby_seen: 1, baby_status: '视频看到婴儿，皮肤轻度黄染，反应可',
+    content: '产妇态度转为配合，同意医生上门复核',
+  })
+  ok('升级后联系记录留痕', !!c1.contact?.id && c1.contact.baby_seen === 1)
+
+  // 缺沟通内容应被拒绝
+  const cBad = await call(doctor.token, 'POST', `/api/escalations/${escId}/contacts`, { contact_name: 'x' })
+  ok('联系记录必填校验', !!cBad.error)
+
+  // 医生决定上门复核 → 自动带入前次照片/电话/未完成测量项
+  const rc = await call(doctor.token, 'POST', `/api/escalations/${escId}/resolve`,
+    { action: 'recheck', scheduled_time: '2099-02-03 10:00', note: '先观测黄疸' })
+  ok('安排上门复核', !!rc.recheck?.id && !!rc.appointment_id, `复核#${rc.recheck?.id}`)
+  const carried = await call(nurse.token, 'GET', `/api/rechecks/by-appointment/${rc.appointment_id}`)
+  ok('复核自动带入：前次（最近一次）到达照片', carried.recheck.carried_photos.includes('data:image/svg+xml,door2'))
+  ok('复核自动带入：电话沟通记录', /只愿意电话沟通|拒绝入户/.test(carried.recheck.carried_phone_log))
+  ok('复核自动带入：未完成测量项', carried.recheck.pending_items.includes('体重测量') && carried.recheck.pending_items.includes('经皮胆红素测量'),
+    carried.recheck.pending_items.join('、'))
+
+  // 无复核时间应被拦截
+  const rcBad = await call(doctor.token, 'POST', `/api/escalations/${escId}/resolve`, { action: 'recheck' })
+  ok('复核需明确时间', !!rcBad.error)
+
+  // 用复核预约真正完成一次访视 → 升级工单闭环
+  const visit = await call(nurse.token, 'POST', '/api/visits', {
+    archive_id: zheng.id, appointment_id: rc.appointment_id, visit_time: '2099-02-03T10:20',
+    weight: 3850, bilirubin: 150, feeding_freq: 9, stool_count: 3, stool_color: '黄色', urine_count: 8,
+  })
+  ok('复核访视提交', !!visit.visit?.id)
+  const escAfter = await call(doctor.token, 'GET', `/api/escalations/${escId}`)
+  ok('成功访视后升级工单闭环', escAfter.escalation.status === '已闭环', escAfter.escalation.status)
+
+  // 种子数据中的连续拒访家庭（林念念）应已在升级列表
+  const seedEsc = await call(doctor.token, 'GET', '/api/escalations?status=open')
+  const lin = seedEsc.escalations.find(e => e.baby_name === '林念念')
+  ok('种子连续拒访家庭已升级', !!lin && lin.refusal_count === 2 && lin.status !== '已闭环', lin ? `${lin.title}` : '未找到')
+}
 
 // 8 医生决策 + 闭环
 const fus = await call(doctor.token, 'GET', '/api/followups')

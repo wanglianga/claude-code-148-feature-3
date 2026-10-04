@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS appointments (
   nurse_id INTEGER REFERENCES users(id),
   type TEXT NOT NULL DEFAULT '初访',    -- 初访/复查/加访
   scheduled_time TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT '待访视', -- 待访视/已完成/已改约/未开门/已取消
+  status TEXT NOT NULL DEFAULT '待访视', -- 待访视/已完成/已改约/未开门/家属拒访/已取消
   reason TEXT DEFAULT '',              -- 改约/未开门等原因
   created_at TEXT DEFAULT (datetime('now','localtime')),
   updated_at TEXT DEFAULT (datetime('now','localtime'))
@@ -134,10 +134,77 @@ CREATE TABLE IF NOT EXISTS consults (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   archive_id INTEGER NOT NULL REFERENCES archives(id),
-  kind TEXT NOT NULL,                  -- 预约/改约/未开门/访视/复查/转诊/指导/材料/咨询/决策/闭环
+  kind TEXT NOT NULL,                  -- 预约/改约/未开门/拒访/升级/联系/复核/访视/复查/转诊/指导/材料/咨询/决策/闭环
   title TEXT NOT NULL,
   detail TEXT DEFAULT '',
   actor TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS refusals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  archive_id INTEGER NOT NULL REFERENCES archives(id),
+  appointment_id INTEGER REFERENCES appointments(id),
+  nurse_id INTEGER REFERENCES users(id),
+  seq INTEGER NOT NULL DEFAULT 1,        -- 本户第几次拒访
+  arrived_at TEXT NOT NULL,             -- 护士到达时间
+  contact_name TEXT DEFAULT '',         -- 电话沟通对象（产妇本人/丈夫/婆婆…）
+  contact_relation TEXT DEFAULT '',     -- 与母婴关系
+  tone TEXT DEFAULT '平静',             -- 对方语气：配合/平静/不耐烦/抵触/敌对
+  reason TEXT NOT NULL DEFAULT '',      -- 拒访原因
+  phone_content TEXT DEFAULT '',        -- 电话沟通内容
+  baby_seen INTEGER NOT NULL DEFAULT 0, -- 是否看到婴儿
+  baby_status TEXT DEFAULT '',          -- 婴儿状态（看到/隔着门听到等）
+  photos TEXT DEFAULT '[]',             -- 到达现场照片 JSON [dataUrl]
+  follow_up TEXT DEFAULT '',            -- 明确后续安排（再约时间/已上报升级）
+  escalation_id INTEGER,                -- 触发或关联的升级工单
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS escalations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  archive_id INTEGER NOT NULL REFERENCES archives(id),
+  level TEXT NOT NULL DEFAULT '社区医生', -- 社区医生/妇幼专员
+  status TEXT NOT NULL DEFAULT '待处置',  -- 待处置/处置中/已恢复访视/已联系街道/已闭环
+  refusal_count INTEGER NOT NULL DEFAULT 2, -- 升级时连续拒访次数
+  last_refusal_id INTEGER REFERENCES refusals(id),
+  title TEXT NOT NULL DEFAULT '',
+  detail TEXT DEFAULT '',
+  created_by TEXT DEFAULT '系统',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  resolved_at TEXT,
+  resolved_by TEXT,
+  resolution TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS escalation_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  escalation_id INTEGER NOT NULL REFERENCES escalations(id),
+  channel TEXT DEFAULT '电话',           -- 电话/上门/微信/短信
+  contact_name TEXT DEFAULT '',          -- 联系对象
+  contact_relation TEXT DEFAULT '',      -- 与母婴关系
+  tone TEXT DEFAULT '平静',              -- 语气
+  refusal_reason TEXT DEFAULT '',        -- 本次拒访/不配合原因
+  baby_seen INTEGER NOT NULL DEFAULT 0,  -- 是否看到婴儿
+  baby_status TEXT DEFAULT '',           -- 婴儿状态
+  content TEXT DEFAULT '',               -- 沟通内容
+  contacted_by TEXT DEFAULT '',          -- 记录人
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS rechecks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  escalation_id INTEGER NOT NULL REFERENCES escalations(id),
+  archive_id INTEGER NOT NULL REFERENCES archives(id),
+  appointment_id INTEGER REFERENCES appointments(id),
+  decided_by TEXT DEFAULT '',
+  scheduled_time TEXT DEFAULT '',
+  pending_items TEXT DEFAULT '[]',       -- 未完成测量项 JSON（自动带入）
+  carried_photos TEXT DEFAULT '[]',      -- 前次护士到达照片 JSON（自动带入）
+  carried_phone_log TEXT DEFAULT '',     -- 前次电话沟通记录（自动带入）
+  carried_refusal_reason TEXT DEFAULT '',-- 前次拒访原因（便于沟通）
+  status TEXT DEFAULT '待上门',           -- 待上门/已完成
+  result_note TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
 
@@ -152,6 +219,11 @@ CREATE INDEX IF NOT EXISTS idx_appt_status ON appointments(status);
 CREATE INDEX IF NOT EXISTS idx_visit_archive ON visits(archive_id);
 CREATE INDEX IF NOT EXISTS idx_followup_status ON followups(status);
 CREATE INDEX IF NOT EXISTS idx_events_archive ON events(archive_id);
+CREATE INDEX IF NOT EXISTS idx_refusal_archive ON refusals(archive_id);
+CREATE INDEX IF NOT EXISTS idx_escalation_archive ON escalations(archive_id);
+CREATE INDEX IF NOT EXISTS idx_escalation_status ON escalations(status);
+CREATE INDEX IF NOT EXISTS idx_escalation_contact ON escalation_contacts(escalation_id);
+CREATE INDEX IF NOT EXISTS idx_recheck_escalation ON rechecks(escalation_id);
 `)
 
 export function addEvent(archiveId, kind, title, detail = '', actor = '') {

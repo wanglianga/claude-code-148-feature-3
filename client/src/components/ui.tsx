@@ -70,8 +70,23 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
 }
 
 export const APPT_STATUS_COLOR: Record<string, string> = {
-  待访视: 'amber', 已完成: 'green', 已改约: 'teal', 未开门: 'red', 已取消: 'gray',
+  待访视: 'amber', 已完成: 'green', 已改约: 'teal', 未开门: 'red', 家属拒访: 'red', 已取消: 'gray',
 }
 export const FOLLOWUP_TYPE_COLOR: Record<string, string> = {
-  复查: 'coral', 转诊: 'red', 母乳指导: 'teal', 电话随访: 'amber', 线上咨询: 'teal', 再次预约: 'amber',
+  复查: 'coral', 转诊: 'red', 母乳指导: 'teal', 电话随访: 'amber', 线上咨询: 'teal', 再次预约: 'amber', 拒访升级: 'red',
+}
+export const ESCALATION_STATUS_COLOR: Record<string, string> = {
+  待处置: 'red', 处置中: 'amber', 已联系街道: 'teal', 已恢复访视: 'green', 已闭环: 'green',
+}
+export const TONE_COLOR: Record<string, string> = {
+  配合: 'green', 平静: 'teal', 不耐烦: 'amber', 抵触: 'coral', 敌对: 'red',
+}
+
+// 分段选择器
+export function Seg({ options, value, onChange, teal }: { options: string[]; value: string; onChange: (v: string) => void; teal?: boolean }) {
+  return (
+    <div className={`seg ${teal ? 'teal' : ''}`}>
+      {options.map((o) => <span key={o} className={`opt ${value === o ? 'on' : ''}`} onClick={() => onChange(o)}>{o}</span>)}
+    </div>
+  )
 }

@@ -10,6 +10,7 @@ const FILTERS = [
   { key: 'unvisited', label: '未访视' },
   { key: 'jaundice', label: '异常黄疸' },
   { key: 'maternal', label: '产妇风险' },
+  { key: 'refusal', label: '拒访家庭' },
   { key: 'unclosed', label: '待闭环' },
 ]
 
@@ -55,6 +56,7 @@ export default function Archives() {
           <div className="row wrap small muted" style={{ marginTop: 4 }}>
             {a.pending_appts ? <Badge color="amber">待访视 ×{a.pending_appts}</Badge> : null}
             {a.open_followups ? <Badge color="teal">待闭环 ×{a.open_followups}</Badge> : null}
+            {a.open_escalations ? <Badge color="red">拒访升级 ×{a.open_escalations}</Badge> : a.refusal_count ? <Badge color="gray">曾拒访 ×{a.refusal_count}</Badge> : null}
             {a.last_bilirubin != null && <span>最近黄疸 {a.last_bilirubin} µmol/L</span>}
             {a.next_appt && <span>下次预约 {fmtTime(a.next_appt)}</span>}
           </div>

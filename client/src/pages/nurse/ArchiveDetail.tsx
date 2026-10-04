@@ -3,10 +3,11 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../../api'
 import type { ArchiveDetail as Detail, Followup, Visit } from '../../types'
-import { AgeText, APPT_STATUS_COLOR, Badge, Empty, FOLLOWUP_TYPE_COLOR, Modal, RiskBadge, fmtTime, toast } from '../../components/ui'
+import { AgeText, APPT_STATUS_COLOR, Badge, Empty, ESCALATION_STATUS_COLOR, FOLLOWUP_TYPE_COLOR, Modal, RiskBadge, TONE_COLOR, fmtTime, toast } from '../../components/ui'
+import { EscalationDetail } from './Escalations'
 import { useAuth } from '../../store/auth'
 
-const TABS = ['概览', '访视记录', '复查转诊', '材料咨询', '时间线']
+const TABS = ['概览', '访视记录', '复查转诊', '拒访升级', '材料咨询', '时间线']
 
 export default function ArchiveDetail() {
   const { id } = useParams()
@@ -25,6 +26,8 @@ export default function ArchiveDetail() {
   if (!data) return <Empty text="加载中…" icon="⏳" />
   const a = data.archive
   const openFollowups = data.followups.filter((f) => f.status !== '已闭环')
+  const openEsc = data.escalations.find((e) => e.status !== '已闭环')
+  const reload = load
 
   return (
     <div>
@@ -34,6 +37,11 @@ export default function ArchiveDetail() {
       </div>
       <div className="page-sub"><AgeText birthDate={a.birth_date} /> · {a.birth_weight}g · {a.delivery_mode} · {a.feeding_type}</div>
 
+      {openEsc && (
+        <div className="alert-box danger">
+          🚪 连续拒访 <b>{openEsc.refusal_count}</b> 次，已升级{openEsc.level}（{openEsc.status}）——访视任务保持开放，请到「拒访升级」页签落实后续安排。
+        </div>
+      )}
       {openFollowups.length > 0 && (
         <div className="alert-box warn">
           待闭环 {openFollowups.length} 项：{openFollowups.map((f) => f.type).join('、')}
@@ -43,6 +51,7 @@ export default function ArchiveDetail() {
       {user?.role === 'nurse' && (
         <div className="row wrap mb12">
           <button className="btn primary" onClick={() => nav(`/nurse/visit/new?archiveId=${a.id}`)}>＋ 记录访视</button>
+          <button className="btn danger" onClick={() => nav(`/nurse/refusal/new?archiveId=${a.id}`)}>家属拒访登记</button>
           <button className="btn ghost" onClick={() => nav('/nurse/appointments')}>预约管理</button>
         </div>
       )}
@@ -54,6 +63,7 @@ export default function ArchiveDetail() {
       {tab === '概览' && <OverviewTab d={data} />}
       {tab === '访视记录' && <VisitsTab visits={data.visits} />}
       {tab === '复查转诊' && <FollowupsTab followups={data.followups} onChanged={load} />}
+      {tab === '拒访升级' && <RefusalTab d={data} isDoctor={user?.role === 'doctor'} onChanged={reload} />}
       {tab === '材料咨询' && <DocsConsultsTab d={data} onChanged={load} />}
       {tab === '时间线' && (
         <div className="card">
@@ -61,7 +71,7 @@ export default function ArchiveDetail() {
           {data.events.length === 0 && <Empty text="暂无事件" />}
           <div className="timeline">
             {data.events.map((e) => (
-              <div key={e.id} className={`tl-item ${['转诊'].includes(e.kind) ? 'alert' : ['复查', '未开门', '改约'].includes(e.kind) ? 'warn' : ['闭环', '访视'].includes(e.kind) ? 'done' : ''}`}>
+              <div key={e.id} className={`tl-item ${['转诊', '升级', '拒访'].includes(e.kind) ? 'alert' : ['复查', '未开门', '改约', '联系', '复核'].includes(e.kind) ? 'warn' : ['闭环', '访视'].includes(e.kind) ? 'done' : ''}`}>
                 <div className="row between">
                   <span className="strong small">{e.title}</span>
                   <Badge color="gray">{e.kind}</Badge>
@@ -73,6 +83,55 @@ export default function ArchiveDetail() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function RefusalTab({ d, isDoctor, onChanged }: { d: Detail; isDoctor: boolean; onChanged: () => void }) {
+  const nav = useNavigate()
+  if (d.refusals.length === 0 && d.escalations.length === 0) {
+    return (
+      <div>
+        <Empty text="暂无拒访记录" icon="🚪" />
+        <button className="btn danger block" onClick={() => nav(`/nurse/refusal/new?archiveId=${d.archive.id}`)}>
+          护士按约到达但家属拒绝开门、只愿电话沟通 → 登记拒访
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div>
+      {d.refusals.map((r) => (
+        <div key={r.id} className="card">
+          <div className="row between">
+            <span className="strong">第 {r.seq} 次拒访 · 到达 {fmtTime(r.arrived_at)}</span>
+            <Badge color={TONE_COLOR[r.tone] || 'gray'}>{r.tone}</Badge>
+          </div>
+          <div className="small mt8">沟通对象：{r.contact_name}（{r.contact_relation}）</div>
+          <div className="small">拒访原因：{r.reason}</div>
+          <div className="small muted">📞 {r.phone_content}</div>
+          <div className="small mt8">
+            {r.baby_seen ? <Badge color="amber">看到婴儿</Badge> : <Badge color="red">未看到婴儿</Badge>}{' '}
+            <span className="muted">{r.baby_status || '无婴儿状态描述'}</span>
+          </div>
+          {r.photos.length > 0 && (
+            <div className="photo-row mt8">{r.photos.map((p, i) => <img key={i} src={p} alt={`到达照片${i + 1}`} />)}</div>
+          )}
+          {r.follow_up && <div className="small mt8" style={{ color: 'var(--teal)' }}>后续安排：{r.follow_up}</div>}
+        </div>
+      ))}
+      {d.escalations.map((e) => (
+        <div key={e.id} className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          <div className="row between" style={{ padding: '10px 14px', background: '#fff3f3', borderBottom: '1px solid var(--line)' }}>
+            <span className="strong">升级工单 #{e.id} · {e.level}</span>
+            <Badge color={ESCALATION_STATUS_COLOR[e.status] || 'gray'}>{e.status}</Badge>
+          </div>
+          <div style={{ padding: 10 }}>
+            <EscalationDetail e={e} isDoctor={isDoctor} onChanged={onChanged}
+              onRecheck={(apptId) => nav(`/nurse/visit/new?appointmentId=${apptId}&archiveId=${d.archive.id}&recheck=1`)} />
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

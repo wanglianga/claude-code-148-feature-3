@@ -1,9 +1,9 @@
-// 护士工作台：未访视家庭、异常黄疸、产妇风险、随访闭环一览
+// 护士工作台：未访视家庭、异常黄疸、产妇风险、拒访升级、随访闭环一览
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import type { Dashboard } from '../../types'
-import { APPT_STATUS_COLOR, Badge, Empty, RiskBadge, Stat, fmtTime } from '../../components/ui'
+import { APPT_STATUS_COLOR, Badge, Empty, ESCALATION_STATUS_COLOR, RiskBadge, Stat, fmtTime } from '../../components/ui'
 import { useDrafts } from '../../store/drafts'
 
 export default function Dashboard() {
@@ -26,7 +26,7 @@ export default function Dashboard() {
       <div className="grid4 mb12">
         <Stat num={s.unvisited} label="未访视家庭" color="amber" onClick={() => nav('/nurse/appointments')} />
         <Stat num={s.jaundiceAlerts} label="异常黄疸/复查" color="coral" onClick={() => nav('/nurse/archives?filter=jaundice')} />
-        <Stat num={s.maternalRisks} label="产妇风险" color="red" onClick={() => nav('/nurse/archives?filter=maternal')} />
+        <Stat num={s.refusalEscalations} label="拒访升级" color="red" onClick={() => nav('/nurse/escalations')} />
         <Stat num={s.openFollowups} label="待闭环事项" color="teal" onClick={() => nav('/nurse/followups')} />
       </div>
 
@@ -34,6 +34,22 @@ export default function Dashboard() {
         <div className="alert-box warn row between">
           <span>📡 有 {drafts.length} 条离线访视草稿待同步</span>
           <Link to="/nurse/sync" className="btn sm primary">去同步</Link>
+        </div>
+      )}
+
+      {data.openEscalations.length > 0 && (
+        <div className="card" style={{ borderColor: 'var(--red)' }}>
+          <div className="card-title"><span className="dot" style={{ background: 'var(--red)' }} />连续拒访升级（访视任务开放中，需明确后续安排）</div>
+          {data.openEscalations.map((e) => (
+            <div key={e.id} className="list-item" onClick={() => nav(`/nurse/escalations?id=${e.id}`)}>
+              <div className="row between">
+                <span className="strong">{e.mother_name} · {e.baby_name}</span>
+                <Badge color={ESCALATION_STATUS_COLOR[e.status] || 'red'}>{e.status}</Badge>
+              </div>
+              <div className="small muted mt8">连续拒访 {e.refusal_count} 次 · 升级至{e.level} · {e.title}</div>
+              <div className="small muted">📍 {e.address} · 📞 {e.contact_name} {e.contact_phone}</div>
+            </div>
+          ))}
         </div>
       )}
 

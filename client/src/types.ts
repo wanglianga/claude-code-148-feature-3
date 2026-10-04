@@ -10,6 +10,7 @@ export interface Archive {
   care_ability: string; notes: string; created_at: string
   pending_appts?: number; open_followups?: number; last_risk?: string | null
   last_bilirubin?: number | null; next_appt?: string | null
+  refusal_count?: number; open_escalations?: number
 }
 
 export interface Appointment {
@@ -45,15 +46,51 @@ export interface DocumentItem { id: number; type: string; filename: string; data
 export interface Consult { id: number; question: string; status: string; reply: string; replied_by: string | null; created_at: string; replied_at: string | null }
 export interface EventItem { id: number; kind: string; title: string; detail: string; actor: string; created_at: string }
 
+// —— 家属拒访与连续拒访升级 ——
+export interface Refusal {
+  id: number; archive_id: number; appointment_id: number | null; nurse_id: number | null
+  seq: number; arrived_at: string; contact_name: string; contact_relation: string
+  tone: string; reason: string; phone_content: string
+  baby_seen: number; baby_status: string; photos: string[]
+  follow_up: string; escalation_id: number | null; created_at: string
+}
+
+export interface EscalationContact {
+  id: number; escalation_id: number; channel: string
+  contact_name: string; contact_relation: string; tone: string
+  refusal_reason: string; baby_seen: number; baby_status: string
+  content: string; contacted_by: string; created_at: string
+}
+
+export interface Recheck {
+  id: number; escalation_id: number; archive_id: number; appointment_id: number | null
+  decided_by: string; scheduled_time: string
+  pending_items: string[]; carried_photos: string[]; carried_phone_log: string; carried_refusal_reason: string
+  status: string; result_note: string; created_at: string
+}
+
+export interface Escalation {
+  id: number; archive_id: number; level: string; status: string
+  refusal_count: number; last_refusal_id: number | null
+  title: string; detail: string; created_by: string; created_at: string
+  resolved_at: string | null; resolved_by: string | null; resolution: string
+  mother_name?: string; baby_name?: string; birth_date?: string
+  address?: string; contact_name?: string; contact_phone?: string
+  // 详情接口聚合字段
+  archive?: Archive; refusals?: Refusal[]; contacts?: EscalationContact[]; rechecks?: Recheck[]
+}
+
 export interface ArchiveDetail {
   archive: Archive; appointments: Appointment[]; visits: Visit[]
-  followups: Followup[]; documents: DocumentItem[]; consults: Consult[]; events: EventItem[]
+  followups: Followup[]; refusals: Refusal[]; escalations: Escalation[]
+  documents: DocumentItem[]; consults: Consult[]; events: EventItem[]
 }
 
 export interface Dashboard {
-  stats: { unvisited: number; jaundiceAlerts: number; maternalRisks: number; openFollowups: number; todayAppointments: number }
+  stats: { unvisited: number; jaundiceAlerts: number; maternalRisks: number; openFollowups: number; refusalEscalations: number; todayAppointments: number }
   followupsByType: Record<string, number>
   todayAppointments: Appointment[]
+  openEscalations: Escalation[]
   recentHighRiskVisits: { id: number; visit_time: string; risk_level: string; bilirubin: number | null; weight: number | null; archive_id: number; mother_name: string; baby_name: string }[]
 }
 

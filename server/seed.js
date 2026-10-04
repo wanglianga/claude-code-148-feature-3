@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import db, { addEvent } from './db.js'
 import { createVisit } from './service.js'
+import { recordRefusal, addContact } from './escalation.js'
 
 const hash = (s) => createHash('sha256').update('nbv:' + s).digest('hex')
 const day = 86400000
@@ -12,6 +13,11 @@ const at = (offsetDays, hm = '09:00') => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}:00`
 }
 const iso = (offsetDays, hm = '08:00') => at(offsetDays, hm).replace(' ', 'T').slice(0, 16)
+
+// 到达现场占位照片（SVG data URL），用于演示拒访时留存现场照片并在复核时自动带入
+const doorPhoto = (text, bg = '#8d847c') =>
+  `data:image/svg+xml;${encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='320' height='240'><rect width='100%' height='100%' fill='${bg}'/><text x='160' y='112' font-size='19' fill='#fff' text-anchor='middle' font-family='sans-serif'>🚪 ${text}</text><text x='160' y='142' font-size='13' fill='#f1e4dc' text-anchor='middle' font-family='sans-serif'>护士到达现场照片</text></svg>`)}`
 
 export function seed() {
   const count = db.prepare('SELECT COUNT(*) c FROM users').get().c
@@ -56,6 +62,9 @@ export function seed() {
   // 8 郑倩/郑小星：明天初访
   const a8 = arch(null, '郑倩', '郑小星', '男', -3, 3900, '剖宫产', '混合喂养', '中', '剖宫产切口愈合良好',
     '滨河小区 1 栋 101', '郑倩', '13900000008', -1, '良好', '巨大儿，注意喂养与血糖观察')
+  // 9 林芳/林念念：连续 2 次上门被家属拒访（只愿电话沟通），已自动升级社区医生待处置
+  const a9 = arch(null, '林芳', '林念念', '女', -9, 3000, '顺产', '母乳喂养', '中', '会阴切口愈合良好',
+    '幸福里小区 8 栋 1 单元 702', '林芳丈夫 何先生', '13900000009', -7, '一般', '家属对入户有顾虑，只愿意电话沟通')
 
   const insAppt = db.prepare(`INSERT INTO appointments (archive_id, nurse_id, type, scheduled_time, status, reason)
                               VALUES (?,?,?,?,?,?)`)
@@ -102,6 +111,36 @@ export function seed() {
               VALUES (?,?,?,?,?,?)`)
     .run(a5, '再次预约', '家属未开门，需再次预约上门', '昨日初访未成功，已与家属电话改约今日 16:00',
       at(0, '16:00').slice(0, 10), '王芳')
+
+  // —— 林芳家：连续 2 次拒访 → 自动升级社区医生；升级后仍有联系记录 ——
+  const appt9a = insAppt.run(a9, nurse, '初访', at(-2, '09:30'), '待访视', '').lastInsertRowid
+  recordRefusal({
+    archive_id: a9, appointment_id: appt9a, arrived_at: iso(-2, '09:35'),
+    contact_name: '何先生', contact_relation: '产妇丈夫', tone: '不耐烦',
+    reason: '称产妇在睡觉、怕打扰休息，拒绝入户',
+    phone_content: '家属隔门递出纸条后改为电话沟通：表示宝宝有人照顾、不需要上门，只愿意电话说情况',
+    baby_seen: 0, baby_status: '未看到婴儿，隔着门听到婴儿哭声',
+    photos: [doorPhoto('首次到达·隔门沟通', '#7a726a')],
+    next_time: iso(-1, '10:00'),
+  }, nurseRow)
+  const appt9b = db.prepare(`SELECT id FROM appointments WHERE archive_id=? AND status='待访视' ORDER BY scheduled_time DESC LIMIT 1`).get(a9).id
+  const r2refusal = recordRefusal({
+    archive_id: a9, appointment_id: appt9b, arrived_at: iso(-1, '10:05'),
+    contact_name: '何先生', contact_relation: '产妇丈夫', tone: '抵触',
+    reason: '认为社区访视“没必要”，坚持有事电话联系，再次拒绝开门',
+    phone_content: '电话中语气抵触，称黄疸在退、吃奶正常，不接受入户；护士提醒需亲眼观察婴儿状况，家属挂断',
+    baby_seen: 0, baby_status: '仍未见到婴儿，家属称“挺好的”，状态无法核实',
+    photos: [doorPhoto('再次到达·仍被拒', '#a85f5f')],
+  }, nurseRow)
+  // 升级后护士再联系一次（产妇本人接听）——升级流程中每次联系都留痕
+  if (r2refusal.escalation) {
+    addContact(r2refusal.escalation.id, {
+      channel: '电话', contact_name: '林芳', contact_relation: '产妇本人', tone: '平静',
+      refusal_reason: '丈夫不在家，自己做不了主，担心邻里说闲话',
+      baby_seen: 0, baby_status: '电话中听到婴儿哼唧声，未能亲眼看到',
+      content: '产妇本人态度配合，称入户需丈夫同意，答应晚上与丈夫商量后回电，暂未回电',
+    }, { name: '王芳' })
+  }
 
   // —— 家属补充材料 ——
   const insDoc = db.prepare('INSERT INTO documents (archive_id, uploader_id, type, filename, note) VALUES (?,?,?,?,?)')
