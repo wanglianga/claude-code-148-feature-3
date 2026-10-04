@@ -37,6 +37,13 @@ export default function Dashboard() {
         </div>
       )}
 
+      {s.refusalEscalations > 0 && (
+        <div className="alert-box danger row between">
+          <span>⛔ {s.refusalEscalations} 个家庭连续拒访、已升级社区医生/妇幼专员，访视任务仍待跟进</span>
+          <Link to="/nurse/followups" className="btn sm danger">去处置</Link>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-title"><span className="dot" />今日待访视（含逾期未访）</div>
         {data.todayAppointments.length === 0 && <Empty text="今日暂无待访视家庭" icon="🎉" />}

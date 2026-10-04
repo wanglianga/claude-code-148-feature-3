@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import db, { addEvent } from './db.js'
 import { createVisit } from './service.js'
+import { createRefusal, addContact } from './refusal.js'
 
 const hash = (s) => createHash('sha256').update('nbv:' + s).digest('hex')
 const day = 86400000
@@ -56,6 +57,9 @@ export function seed() {
   // 8 郑倩/郑小星：明天初访
   const a8 = arch(null, '郑倩', '郑小星', '男', -3, 3900, '剖宫产', '混合喂养', '中', '剖宫产切口愈合良好',
     '滨河小区 1 栋 101', '郑倩', '13900000008', -1, '良好', '巨大儿，注意喂养与血糖观察')
+  // 9 钱芳/钱小宝：连续两次拒访（隔门电话沟通），已自动升级社区医生待处置
+  const a9 = arch(null, '钱芳', '钱小宝', '女', -6, 3050, '顺产', '母乳喂养', '中', '会阴切口愈合良好',
+    '幸福里小区 8 栋 1 单元 603', '钱芳丈夫 马先生', '13900000009', -4, '一般', '家属对社区访视有顾虑，两次上门均未开门只愿电话沟通；始终未见到婴儿')
 
   const insAppt = db.prepare(`INSERT INTO appointments (archive_id, nurse_id, type, scheduled_time, status, reason)
                               VALUES (?,?,?,?,?,?)`)
@@ -70,6 +74,7 @@ export function seed() {
   const appt6 = insAppt.run(a6, nurse2, '初访', at(-5, '14:00'), '已完成', '').lastInsertRowid
   const appt7 = insAppt.run(a7, nurse, '初访', at(-3, '10:30'), '已完成', '').lastInsertRowid
   const appt2 = insAppt.run(a2, nurse, '初访', at(-2, '09:30'), '已完成', '').lastInsertRowid
+  const appt9a = insAppt.run(a9, nurse, '初访', at(-2, '09:30'), '待访视', '').lastInsertRowid
 
   // —— 访视记录（走统一 createVisit，风险引擎自动生成复查/转诊/指导/电话随访） ——
   const nurseRow = db.prepare('SELECT * FROM users WHERE id=?').get(nurse)
@@ -102,6 +107,36 @@ export function seed() {
               VALUES (?,?,?,?,?,?)`)
     .run(a5, '再次预约', '家属未开门，需再次预约上门', '昨日初访未成功，已与家属电话改约今日 16:00',
       at(0, '16:00').slice(0, 10), '王芳')
+
+  // —— 连续拒访（钱小宝家）：两次隔门电话沟通，第二次后自动升级社区医生 ——
+  createRefusal({
+    appointment_id: appt9a, archive_id: a9, arrived_at: iso(-2, '09:35'),
+    contact_role: '钱芳丈夫 马先生',
+    phone_content: '隔门通话，马先生称家里老人忌讳外人进门，产妇也不想被打扰；只隔门应答，没有开门。',
+    reason_code: '担心打扰/休息', reason_detail: '老人忌讳外人进门',
+    tone: '回避', baby_visible: '否',
+    followup_kind: '再次预约', followup_time: iso(-1, '15:00'),
+    followup_note: '家属勉强同意次日下午再试',
+  }, nurseRow)
+  const appt9b = db.prepare(`SELECT id FROM appointments WHERE archive_id=? AND status='待访视' ORDER BY scheduled_time`).get(a9).id
+  createRefusal({
+    appointment_id: appt9b, archive_id: a9, arrived_at: iso(-1, '15:05'),
+    contact_role: '钱芳丈夫 马先生',
+    phone_content: '再次上门仍不开门，马先生语气抵触，称宝宝有黄疸但已自行找中医看过，不相信社区测量，拒绝入户。',
+    reason_code: '不信任访视', reason_detail: '已自行找中医看黄疸，拒绝社区测量',
+    tone: '抵触', baby_visible: '否',
+    followup_kind: '电话随访', followup_time: iso(0, '10:00'),
+    followup_note: '先电话沟通争取信任，同时升级社区医生评估',
+  }, nurseRow)
+  const esc9 = db.prepare(`SELECT id FROM escalations WHERE archive_id=? ORDER BY id LIMIT 1`).get(a9)?.id
+  if (esc9) {
+    addContact(esc9, {
+      target: '钱芳丈夫 马先生', channel: '电话', tone: '回避',
+      refusal_reason: '不信任访视', baby_visible: '否',
+      note: '护士今晨电话回访，家属仍拒绝入户，未透露婴儿黄疸与吃奶情况，建议升级由社区医生出面。',
+      contact_at: iso(0, '10:20'),
+    }, nurseRow)
+  }
 
   // —— 家属补充材料 ——
   const insDoc = db.prepare('INSERT INTO documents (archive_id, uploader_id, type, filename, note) VALUES (?,?,?,?,?)')

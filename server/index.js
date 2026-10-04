@@ -8,6 +8,10 @@ import db, { addEvent } from './db.js'
 import { seed } from './seed.js'
 import { createVisit, closeFollowup } from './service.js'
 import { assessVisit } from './risk.js'
+import {
+  createRefusal, addContact, decideEscalation, closeEscalation,
+  reviewBrief, escalationRow, refusalRow, REFUSAL_REASONS, TONES, BABY_VISIBLE,
+} from './refusal.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -61,6 +65,7 @@ app.get('/api/dashboard', auth, requireRole('nurse', 'doctor'), (req, res) => {
       unvisited: appts.length,
       jaundiceAlerts: cnt(`SELECT COUNT(DISTINCT archive_id) c FROM followups WHERE status!='已闭环' AND type IN ('复查','转诊')`),
       maternalRisks: cnt(`SELECT COUNT(DISTINCT archive_id) c FROM followups WHERE status!='已闭环' AND type='电话随访'`),
+      refusalEscalations: cnt(`SELECT COUNT(*) c FROM escalations WHERE status!='已闭环'`),
       openFollowups: openFollowups.length,
       todayAppointments: cnt(`SELECT COUNT(*) c FROM appointments WHERE date(scheduled_time)=date(?) AND status='待访视'`, todayStr + ' 12:00'),
     },
@@ -123,6 +128,93 @@ app.post('/api/appointments/:id/no-show', auth, requireRole('nurse'), (req, res)
   res.json({ ok: true })
 })
 
+// ---------- 家属拒访（隔门、仅电话沟通）与连续拒访升级 ----------
+app.get('/api/refusal-options', auth, (req, res) => {
+  res.json({ reasons: REFUSAL_REASONS, tones: TONES, babyVisible: BABY_VISIBLE })
+})
+
+app.post('/api/appointments/:id/refusal', auth, requireRole('nurse'), (req, res) => {
+  const appt = db.prepare('SELECT * FROM appointments WHERE id=?').get(req.params.id)
+  if (!appt) return res.status(404).json({ error: '预约不存在' })
+  try {
+    const result = createRefusal({ ...(req.body || {}), appointment_id: Number(req.params.id), archive_id: req.body?.archive_id || appt.archive_id }, req.user)
+    res.status(result.duplicated ? 200 : 201).json(result)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 无具体预约（如加访/现场）时登记拒访
+app.post('/api/refusals', auth, requireRole('nurse'), (req, res) => {
+  try {
+    const result = createRefusal(req.body || {}, req.user)
+    res.status(result.duplicated ? 200 : 201).json(result)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 离线拒访草稿批量同步（幂等：client_id 去重）
+app.post('/api/sync/refusals', auth, requireRole('nurse'), (req, res) => {
+  const items = Array.isArray(req.body?.refusals) ? req.body.refusals : []
+  const results = items.map(item => {
+    try {
+      const r = createRefusal({ ...item, created_offline: 1 }, req.user)
+      return { client_id: item.client_id, ok: true, duplicated: r.duplicated, refusal_id: r.refusal.id, escalated: r.escalated }
+    } catch (e) {
+      return { client_id: item.client_id, ok: false, error: e.message }
+    }
+  })
+  res.json({ results })
+})
+
+// 升级单列表（医生决策台 / 护士闭环）
+app.get('/api/escalations', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  const openOnly = req.query.status !== 'all'
+  const rows = db.prepare(`
+    SELECT e.*, ar.mother_name, ar.baby_name, ar.birth_date, ar.address, ar.contact_name, ar.contact_phone
+    FROM escalations e JOIN archives ar ON ar.id=e.archive_id
+    ${openOnly ? `WHERE e.status!='已闭环'` : ''}
+    ORDER BY CASE e.status WHEN '待处置' THEN 0 WHEN '处置中' THEN 1 ELSE 2 END, e.id DESC`).all()
+    .map(escalationRow)
+  res.json({ escalations: rows })
+})
+
+app.post('/api/escalations/:id/contact', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  try {
+    const contact = addContact(Number(req.params.id), req.body || {}, req.user)
+    res.status(201).json({ contact })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 社区医生/妇幼专员处置：上门复核 / 联系街道 / 电话随访 / 转妇幼专员 / 继续观察
+app.post('/api/escalations/:id/decide', auth, requireRole('doctor', 'nurse'), (req, res) => {
+  try {
+    const escalation = decideEscalation(Number(req.params.id), req.body || {}, req.user)
+    res.json({ escalation })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+app.post('/api/escalations/:id/close', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  try {
+    const escalation = closeEscalation(Number(req.params.id), req.user, req.body?.note || '')
+    if (!escalation) return res.status(404).json({ error: '升级单不存在' })
+    res.json({ escalation })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 复核信息包：上次到达照片 + 电话沟通记录 + 未完成测量项（访视页自动带入）
+app.get('/api/archives/:id/review-brief', auth, requireRole('nurse', 'doctor'), (req, res) => {
+  if (!db.prepare('SELECT id FROM archives WHERE id=?').get(req.params.id)) return res.status(404).json({ error: '档案不存在' })
+  res.json({ reviewBrief: reviewBrief(Number(req.params.id)) })
+})
+
 // ---------- 母婴档案 ----------
 app.get('/api/archives', auth, requireRole('nurse', 'doctor'), (req, res) => {
   const { filter, q } = req.query
@@ -132,7 +224,9 @@ app.get('/api/archives', auth, requireRole('nurse', 'doctor'), (req, res) => {
       (SELECT COUNT(*) FROM followups f WHERE f.archive_id=ar.id AND f.status!='已闭环') open_followups,
       (SELECT v.risk_level FROM visits v WHERE v.archive_id=ar.id ORDER BY v.visit_time DESC LIMIT 1) last_risk,
       (SELECT v.bilirubin FROM visits v WHERE v.archive_id=ar.id ORDER BY v.visit_time DESC LIMIT 1) last_bilirubin,
-      (SELECT MIN(a.scheduled_time) FROM appointments a WHERE a.archive_id=ar.id AND a.status='待访视') next_appt
+      (SELECT MIN(a.scheduled_time) FROM appointments a WHERE a.archive_id=ar.id AND a.status='待访视') next_appt,
+      (SELECT COUNT(*) FROM refusals r WHERE r.archive_id=ar.id) refusal_count,
+      (SELECT COUNT(*) FROM escalations e WHERE e.archive_id=ar.id AND e.status!='已闭环') open_escalation
     FROM archives ar ORDER BY ar.created_at DESC`).all()
   if (q) {
     const s = String(q).toLowerCase()
@@ -142,6 +236,7 @@ app.get('/api/archives', auth, requireRole('nurse', 'doctor'), (req, res) => {
   if (filter === 'jaundice') rows = rows.filter(r => r.last_bilirubin != null && ['高', '危急'].includes(r.last_risk))
   if (filter === 'maternal') rows = rows.filter(r =>
     db.prepare(`SELECT COUNT(*) c FROM followups WHERE archive_id=? AND status!='已闭环' AND type='电话随访'`).get(r.id).c > 0)
+  if (filter === 'refusal') rows = rows.filter(r => r.open_escalation > 0)
   if (filter === 'unclosed') rows = rows.filter(r => r.open_followups > 0)
   res.json({ archives: rows })
 })
@@ -152,10 +247,15 @@ app.get('/api/archives/:id', auth, (req, res) => {
   if (req.user.role === 'family' && archive.family_user_id !== req.user.id) return res.status(403).json({ error: '无权访问' })
   const visits = db.prepare('SELECT * FROM visits WHERE archive_id=? ORDER BY visit_time DESC').all(archive.id)
     .map(v => ({ ...v, flags: JSON.parse(v.flags || '[]'), photos: JSON.parse(v.photos || '[]') }))
+  const refusals = db.prepare('SELECT * FROM refusals WHERE archive_id=? ORDER BY seq DESC, id DESC').all(archive.id).map(refusalRow)
+  const escalations = db.prepare('SELECT * FROM escalations WHERE archive_id=? ORDER BY id DESC').all(archive.id).map(escalationRow)
   res.json({
     archive,
     appointments: db.prepare('SELECT a.*, u.name nurse_name FROM appointments a LEFT JOIN users u ON u.id=a.nurse_id WHERE a.archive_id=? ORDER BY a.scheduled_time DESC').all(archive.id),
     visits,
+    refusals,
+    escalations,
+    reviewBrief: reviewBrief(archive.id),
     followups: db.prepare('SELECT * FROM followups WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),
     documents: db.prepare('SELECT id, archive_id, type, filename, data_url, note, created_at FROM documents WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),
     consults: db.prepare('SELECT * FROM consults WHERE archive_id=? ORDER BY created_at DESC').all(archive.id),

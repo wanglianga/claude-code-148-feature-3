@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
-import type { Archive, ArchiveDetail, VisitPayload } from '../../types'
+import type { Archive, ArchiveDetail, ReviewBrief, VisitPayload } from '../../types'
 import { assessVisit } from '../../risk'
 import { Badge, Empty, RiskBadge, fmtTime, toast } from '../../components/ui'
 import { isOfflineNow, useNet } from '../../store/net'
@@ -19,6 +19,7 @@ export default function VisitForm() {
   const archiveId = Number(sp.get('archiveId'))
   const appointmentId = sp.get('appointmentId') ? Number(sp.get('appointmentId')) : null
   const [archive, setArchive] = useState<Archive | null>(null)
+  const [brief, setBrief] = useState<ReviewBrief | null>(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const nav = useNavigate()
@@ -42,6 +43,7 @@ export default function VisitForm() {
     api.get<ArchiveDetail>(`/api/archives/${archiveId}`)
       .then((d) => {
         setArchive(d.archive)
+        setBrief(d.reviewBrief)
         setF((s) => ({ ...s, feeding_type: s.feeding_type || d.archive.feeding_type, wound_check: s.wound_check || d.archive.maternal_wound, care_ability: s.care_ability || d.archive.care_ability }))
       })
       .catch((e) => setErr(`档案加载失败：${e.message}（离线状态下请回到社区网络环境再打开本页，或先在同步页处理草稿）`))
@@ -72,6 +74,7 @@ export default function VisitForm() {
     const id = clientId || newClientId()
     saveDraft({
       clientId: id,
+      kind: 'visit',
       label: `${archive!.baby_name}（${archive!.mother_name}）· ${f.visit_time.replace('T', ' ')}`,
       savedAt: new Date().toLocaleString('zh-CN'),
       status: '待同步',
@@ -128,6 +131,10 @@ export default function VisitForm() {
       </div>
 
       {offline && <div className="alert-box warn">📵 离线模式：提交将保存为本地草稿，不会上传服务器</div>}
+
+      {brief?.hasOpenEscalation && brief.escalation?.decision === '上门复核' && (
+        <ReviewBriefCard brief={brief} />
+      )}
 
       <div className="card">
         <div className="card-title"><span className="dot" />婴儿测量</div>
@@ -272,6 +279,58 @@ function Seg({ options, value, onChange }: { options: string[]; value: string; o
   return (
     <div className="seg">
       {options.map((o) => <span key={o} className={`opt ${value === o ? 'on' : ''}`} onClick={() => onChange(o)}>{o}</span>)}
+    </div>
+  )
+}
+
+// 连续拒访→社区医生决定上门复核：自动带入上次到达照片、电话沟通记录、未完成测量项，
+// 让护士一次问全，减少重复询问造成的家属抵触
+function ReviewBriefCard({ brief }: { brief: ReviewBrief }) {
+  const phoneLog = [
+    ...brief.refusals.map((r) => ({ at: r.arrived_at, who: `护士上门·${r.contact_role || '-'}`, text: r.phone_content, tone: r.tone, baby: r.baby_visible, reason: r.reason_code })),
+    ...brief.contacts.map((c) => ({ at: c.contact_at, who: `${c.contact_by_role}·${c.contact_by}→${c.target}`, text: [c.refusal_reason ? `原因：${c.refusal_reason}` : '', c.note].filter(Boolean).join('；'), tone: c.tone, baby: c.baby_visible, reason: c.refusal_reason })),
+  ].sort((x, y) => String(y.at).localeCompare(String(x.at)))
+  return (
+    <div className="card" style={{ borderColor: 'var(--red)' }}>
+      <div className="row between">
+        <div className="card-title" style={{ margin: 0 }}><span className="dot" style={{ background: 'var(--red)' }} />上门复核信息包（已自动带入）</div>
+        <Badge color="red">{brief.escalation?.level}</Badge>
+      </div>
+      <div className="small muted" style={{ margin: '6px 0' }}>
+        该家庭连续拒访、{brief.escalation?.decided_by || '社区医生'}决定上门复核。下列信息由前次上门与电话记录自动汇总，请优先补齐未完成项，避免重复询问。
+      </div>
+
+      {brief.pendingMeasurements.length > 0 && (
+        <div className="field">
+          <label>本次需要现场补齐的未完成测量项</label>
+          <div className="row wrap">
+            {brief.pendingMeasurements.map((m) => <Badge key={m} color="coral">{m}</Badge>)}
+          </div>
+        </div>
+      )}
+
+      {brief.photoRefusal && (
+        <div className="field">
+          <label>前一次护士到达照片（{fmtTime(brief.photoRefusal.arrived_at)}，第 {brief.photoRefusal.seq} 次拒访）</label>
+          {brief.photoRefusal.photos.length > 0
+            ? <div className="photo-row">{brief.photoRefusal.photos.map((p, i) => <img key={i} src={p} alt={`到达照片${i + 1}`} />)}</div>
+            : <div className="small muted">前次未拍摄到达照片</div>}
+        </div>
+      )}
+
+      <div className="field" style={{ marginBottom: 0 }}>
+        <label>电话沟通记录（拒访登记 + 升级流程联系）</label>
+        {phoneLog.length === 0 && <div className="small muted">暂无电话记录</div>}
+        {phoneLog.map((c, i) => (
+          <div key={i} className="small" style={{ padding: '6px 0', borderBottom: '1px dashed var(--line)' }}>
+            <div className="row between">
+              <b>{fmtTime(c.at)}</b>
+              <span><Badge color="gray">{c.tone}</Badge> <Badge color={c.baby === '是' ? 'green' : c.baby === '不确定' ? 'amber' : 'red'}>看到婴儿：{c.baby}</Badge></span>
+            </div>
+            <div className="muted" style={{ marginTop: 2 }}>{c.who}：{c.text}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 // 访视落库与随访闭环的领域服务：种子数据与 HTTP 路由共用，保证行为一致
 import db, { addEvent } from './db.js'
 import { assessVisit } from './risk.js'
+import { closeEscalationAfterReview } from './refusal.js'
 
 const VISIT_COLS = ['client_id','appointment_id','archive_id','nurse_id','visit_time','weight','bilirubin',
   'bilirubin_site','cord','stool_count','stool_color','urine_count','feeding_type','feeding_freq','spit_up',
@@ -102,6 +103,9 @@ export function createVisit(payload, nurse) {
   addEvent(archive.id, '访视', `完成访视（风险：${v.risk_level}）`,
     summary + (v.device_issue ? '。【设备故障，手工记录】' : '') + (v.created_offline ? '。【离线草稿补录同步】' : ''),
     nurseName)
+
+  // 若该家庭正处于“连续拒访→医生决定上门复核”流程，本次访视即复核完成，自动闭环升级单
+  closeEscalationAfterReview(archive.id, visitId, nurseName)
 
   return { visit: db.prepare('SELECT * FROM visits WHERE id=?').get(visitId), duplicated: false, assessment: r }
 }

@@ -5,7 +5,7 @@ import { api } from '../../api'
 import type { Appointment } from '../../types'
 import { APPT_STATUS_COLOR, Badge, Empty, Modal, fmtTime, toast } from '../../components/ui'
 
-const TABS = ['待访视', '已完成', '未开门', '全部'] as const
+const TABS = ['待访视', '已完成', '拒访', '未开门', '全部'] as const
 
 export default function Appointments() {
   const [tab, setTab] = useState<(typeof TABS)[number]>('待访视')
@@ -51,8 +51,14 @@ export default function Appointments() {
             <div className="row wrap mt8">
               <button className="btn primary sm" onClick={() => nav(`/nurse/visit/new?appointmentId=${a.id}&archiveId=${a.archive_id}`)}>开始访视</button>
               <button className="btn ghost sm" onClick={() => setRescheduleOf(a)}>改约</button>
-              <button className="btn danger sm" onClick={() => noShow(a)}>家属未开门</button>
+              <button className="btn danger sm" onClick={() => nav(`/nurse/refusal/new?appointmentId=${a.id}&archiveId=${a.archive_id}`)}>家属拒访</button>
+              <button className="btn ghost sm" onClick={() => noShow(a)}>无人应答</button>
               <button className="btn ghost sm" onClick={() => nav(`/nurse/archives/${a.archive_id}`)}>档案</button>
+            </div>
+          )}
+          {a.status === '拒访' && (
+            <div className="alert-box danger mt8" style={{ marginBottom: 0 }}>
+              家属拒绝开门、仅电话沟通。该预约不视为完成，可在档案「拒访与升级」中查看记录与后续安排。
             </div>
           )}
           {a.status !== '待访视' && (

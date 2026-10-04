@@ -5,8 +5,9 @@ import { api } from '../../api'
 import type { ArchiveDetail as Detail, Followup, Visit } from '../../types'
 import { AgeText, APPT_STATUS_COLOR, Badge, Empty, FOLLOWUP_TYPE_COLOR, Modal, RiskBadge, fmtTime, toast } from '../../components/ui'
 import { useAuth } from '../../store/auth'
+import { RefusalTab } from './RefusalEscalation'
 
-const TABS = ['概览', '访视记录', '复查转诊', '材料咨询', '时间线']
+const TABS = ['概览', '访视记录', '拒访与升级', '复查转诊', '材料咨询', '时间线']
 
 export default function ArchiveDetail() {
   const { id } = useParams()
@@ -25,6 +26,7 @@ export default function ArchiveDetail() {
   if (!data) return <Empty text="加载中…" icon="⏳" />
   const a = data.archive
   const openFollowups = data.followups.filter((f) => f.status !== '已闭环')
+  const openEscalation = data.escalations.find((e) => e.status !== '已闭环')
 
   return (
     <div>
@@ -34,6 +36,12 @@ export default function ArchiveDetail() {
       </div>
       <div className="page-sub"><AgeText birthDate={a.birth_date} /> · {a.birth_weight}g · {a.delivery_mode} · {a.feeding_type}</div>
 
+      {openEscalation && (
+        <div className="alert-box danger">
+          ⛔ 连续拒访升级中（{openEscalation.level} · {openEscalation.status}）：已拒访 {openEscalation.refusal_count} 次，访视任务未关闭，
+          请在「拒访与升级」页签记录每次联系并跟进。
+        </div>
+      )}
       {openFollowups.length > 0 && (
         <div className="alert-box warn">
           待闭环 {openFollowups.length} 项：{openFollowups.map((f) => f.type).join('、')}
@@ -43,6 +51,7 @@ export default function ArchiveDetail() {
       {user?.role === 'nurse' && (
         <div className="row wrap mb12">
           <button className="btn primary" onClick={() => nav(`/nurse/visit/new?archiveId=${a.id}`)}>＋ 记录访视</button>
+          <button className="btn danger" onClick={() => nav(`/nurse/refusal/new?archiveId=${a.id}`)}>家属拒访登记</button>
           <button className="btn ghost" onClick={() => nav('/nurse/appointments')}>预约管理</button>
         </div>
       )}
@@ -53,6 +62,7 @@ export default function ArchiveDetail() {
 
       {tab === '概览' && <OverviewTab d={data} />}
       {tab === '访视记录' && <VisitsTab visits={data.visits} />}
+      {tab === '拒访与升级' && <RefusalTab d={data} onChanged={load} />}
       {tab === '复查转诊' && <FollowupsTab followups={data.followups} onChanged={load} />}
       {tab === '材料咨询' && <DocsConsultsTab d={data} onChanged={load} />}
       {tab === '时间线' && (
@@ -61,7 +71,7 @@ export default function ArchiveDetail() {
           {data.events.length === 0 && <Empty text="暂无事件" />}
           <div className="timeline">
             {data.events.map((e) => (
-              <div key={e.id} className={`tl-item ${['转诊'].includes(e.kind) ? 'alert' : ['复查', '未开门', '改约'].includes(e.kind) ? 'warn' : ['闭环', '访视'].includes(e.kind) ? 'done' : ''}`}>
+              <div key={e.id} className={`tl-item ${['转诊', '拒访', '升级'].includes(e.kind) ? 'alert' : ['复查', '未开门', '改约', '联系'].includes(e.kind) ? 'warn' : ['闭环', '访视'].includes(e.kind) ? 'done' : ''}`}>
                 <div className="row between">
                   <span className="strong small">{e.title}</span>
                   <Badge color="gray">{e.kind}</Badge>

@@ -5,9 +5,9 @@
   "type": "module",
   "description": "社区新生儿上门访视与黄疸随访 - 后端服务",
   "scripts": {
-    "seed": "node server/seed.js",
-    "start": "node server/index.js",
-    "dev": "node server/index.js"
+    "seed": "node seed.js",
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
     "better-sqlite3": "11.10.0",

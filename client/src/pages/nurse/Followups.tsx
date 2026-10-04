@@ -2,13 +2,15 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
-import type { Followup } from '../../types'
+import type { Followup, Escalation } from '../../types'
 import { AgeText, Badge, Empty, FOLLOWUP_TYPE_COLOR, fmtTime } from '../../components/ui'
 import { FollowupsTab } from './ArchiveDetail'
+import { EscalationCard } from './RefusalEscalation'
 import { useAuth } from '../../store/auth'
 
 export default function Followups({ doctor }: { doctor?: boolean }) {
   const [rows, setRows] = useState<Followup[]>([])
+  const [escalations, setEscalations] = useState<Escalation[]>([])
   const [showAll, setShowAll] = useState(false)
   const [loading, setLoading] = useState(true)
   const nav = useNavigate()
@@ -17,8 +19,10 @@ export default function Followups({ doctor }: { doctor?: boolean }) {
 
   function load() {
     setLoading(true)
-    api.get<{ followups: Followup[] }>(`/api/followups${showAll ? '?status=all' : ''}`)
-      .then((r) => setRows(r.followups)).finally(() => setLoading(false))
+    Promise.all([
+      api.get<{ followups: Followup[] }>(`/api/followups${showAll ? '?status=all' : ''}`),
+      api.get<{ escalations: Escalation[] }>(showAll ? '/api/escalations?status=all' : '/api/escalations'),
+    ]).then(([f, e]) => { setRows(f.followups); setEscalations(e.escalations) }).finally(() => setLoading(false))
   }
   useEffect(load, [showAll])
 
@@ -28,14 +32,22 @@ export default function Followups({ doctor }: { doctor?: boolean }) {
     <div>
       <div className="page-title">{isDoctor ? '随访决策' : '随访闭环'}</div>
       <div className="page-sub">
-        {isDoctor ? '综合出生天数、体重变化、喂养、排便、产妇恢复与家庭照护能力，决定复查、转诊或电话随访' : '异常黄疸、产妇风险、未开门、咨询等事项的处理闭环'}
+        {isDoctor ? '综合出生天数、体重变化、喂养、排便、产妇恢复与家庭照护能力，决定复查、转诊或电话随访；连续拒访家庭在此决定上门复核或联系街道' : '异常黄疸、产妇风险、拒访、咨询等事项的处理闭环'}
       </div>
       <div className="tabs">
         <div className={`tab ${!showAll ? 'on' : ''}`} onClick={() => setShowAll(false)}>待处理（{open.length}）</div>
         <div className={`tab ${showAll ? 'on' : ''}`} onClick={() => setShowAll(true)}>全部记录</div>
       </div>
       {loading && <Empty text="加载中…" icon="⏳" />}
-      {!loading && rows.length === 0 && <Empty text="暂无待处理事项，全部闭环 🎉" icon="🎉" />}
+      {!loading && escalations.length > 0 && (
+        <div className="mb12">
+          <div className="card-title"><span className="dot" style={{ background: 'var(--red)' }} />连续拒访升级（{escalations.length}）</div>
+          {escalations.map((e) => (
+            <EscalationCard key={e.id} esc={e} onChanged={load} doctor={isDoctor} />
+          ))}
+        </div>
+      )}
+      {!loading && rows.length === 0 && escalations.length === 0 && <Empty text="暂无待处理事项，全部闭环 🎉" icon="🎉" />}
       {!loading && rows.length > 0 && (
         doctorGrouped(rows, nav, load, isDoctor)
       )}

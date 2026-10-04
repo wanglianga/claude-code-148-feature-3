@@ -70,8 +70,9 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
 }
 
 export const APPT_STATUS_COLOR: Record<string, string> = {
-  待访视: 'amber', 已完成: 'green', 已改约: 'teal', 未开门: 'red', 已取消: 'gray',
+  待访视: 'amber', 已完成: 'green', 已改约: 'teal', 拒访: 'red', 未开门: 'gray', 已取消: 'gray',
 }
 export const FOLLOWUP_TYPE_COLOR: Record<string, string> = {
   复查: 'coral', 转诊: 'red', 母乳指导: 'teal', 电话随访: 'amber', 线上咨询: 'teal', 再次预约: 'amber',
+  拒访升级: 'red', 上门复核: 'coral', 联系街道: 'teal',
 }
